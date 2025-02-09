@@ -6,6 +6,17 @@ import {
   ModelProviderName,
   elizaLogger,
   MemoryManager,
+  Memory,
+  State,
+  IAgentRuntime,
+  Content,
+  composeContext,
+  generateMessageResponse,
+  generateShouldRespond,
+  ModelClass,
+  stringToUuid,
+  CacheManager,
+  MemoryCacheAdapter,
 } from "@ai16z/eliza";
 
 elizaLogger.closeByNewLine = false;
@@ -20,31 +31,13 @@ import { gateDataPlugin } from "../plugins/gated-storage-plugin/index.js";
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 
-import { composeContext } from "@ai16z/eliza";
-import { getEmbeddingZeroVector } from "@ai16z/eliza";
-import {
-  Content,
-  HandlerCallback,
-  IAgentRuntime,
-  IImageDescriptionService,
-  Memory,
-  ModelClass,
-  State,
-  UUID,
-  CacheManager,
-  MemoryCacheAdapter,
-} from "@ai16z/eliza";
-import { stringToUuid } from "@ai16z/eliza";
+import { randomUUID } from "crypto";
 
-import { generateMessageResponse, generateShouldRespond } from "@ai16z/eliza";
 import { messageCompletionFooter, shouldRespondFooter } from "@ai16z/eliza";
-import { Message } from "grammy/types";
 import { Bot, Context } from "grammy";
 import { bootstrapPlugin } from "@ai16z/plugin-bootstrap";
 import { collablandPlugin } from "../plugins/collabland.plugin.js";
 import { StorageService } from "../plugins/gated-storage-plugin/services/storage.service.js";
-
-const MAX_MESSAGE_LENGTH = 4096; // Telegram's max message length
 
 const telegramShouldRespondTemplate =
   `# About {{agentName}}:
@@ -162,68 +155,37 @@ Thread of Tweets You Are Replying To:
 {{formattedConversation}}
 ` + messageCompletionFooter;
 
+interface ElizaMessage extends Omit<Memory, "content"> {
+  content: {
+    text: string;
+    caption?: string;
+    photo?: boolean;
+  };
+  chat: {
+    type: string;
+    id: number;
+  };
+  document?: {
+    mime_type?: string;
+  };
+}
+
 export class MessageManager {
   public bot: Bot<Context>;
   private runtime: IAgentRuntime;
-  private imageService: IImageDescriptionService;
 
   constructor(bot: Bot<Context>, runtime: IAgentRuntime) {
     this.bot = bot;
     this.runtime = runtime;
   }
 
-  // Process image messages and generate descriptions
-  private async processImage(
-    message: Message
-  ): Promise<{ description: string } | null> {
-    // elizaLogger.info(
-    //     "🖼️ Processing image message:",
-    //     JSON.stringify(message, null, 2)
-    // );
-
-    try {
-      let imageUrl: string | null = null;
-
-      // Handle photo messages
-      if ("photo" in message && message.photo!.length > 0) {
-        const photo = message.photo![message.photo!.length - 1];
-        const fileLink = await this.bot.api.getFile(photo.file_id);
-        imageUrl = fileLink.toString();
-      }
-      // Handle image documents
-      else if (
-        "document" in message &&
-        message.document?.mime_type?.startsWith("image/")
-      ) {
-        const doc = message.document;
-        const fileLink = await this.bot.api.getFile(doc.file_id);
-        imageUrl = fileLink.toString();
-      }
-
-      if (imageUrl) {
-        const { title, description } =
-          await this.imageService.describeImage(imageUrl);
-        const fullDescription = `[Image: ${title}\n${description}]`;
-        return { description: fullDescription };
-      }
-    } catch (error) {
-      console.error("❌ Error processing image:", error);
-    }
-
-    return null; // No image found
-  }
-
   // Decide if the bot should respond to the message
   private async _shouldRespond(
-    message: Message,
+    message: ElizaMessage,
     state: State
   ): Promise<boolean> {
     // Respond if bot is mentioned
-
-    if (
-      "text" in message &&
-      message.text?.includes(`@${this.bot.botInfo?.username}`)
-    ) {
+    if (message.content.text?.includes(`@${this.bot.botInfo?.username}`)) {
       return true;
     }
 
@@ -234,15 +196,14 @@ export class MessageManager {
 
     // Respond to images in group chats
     if (
-      "photo" in message ||
-      ("document" in message &&
-        message.document?.mime_type?.startsWith("image/"))
+      message.content.photo ||
+      message.document?.mime_type?.startsWith("image/")
     ) {
       return false;
     }
 
     // Use AI to decide for text or captions
-    if ("text" in message || ("caption" in message && message.caption)) {
+    if (message.content.text || message.content.caption) {
       const shouldRespondContext = composeContext({
         state,
         template:
@@ -260,50 +221,7 @@ export class MessageManager {
       return response === "RESPOND";
     }
 
-    return false; // No criteria met
-  }
-
-  // Send long messages in chunks
-  private async sendMessageInChunks(
-    ctx: Context,
-    content: string,
-    replyToMessageId?: number
-  ): Promise<Message.TextMessage[]> {
-    const chunks = this.splitMessage(content);
-    const sentMessages: Message.TextMessage[] = [];
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const sentMessage = (await this.bot.api.sendMessage(ctx.chat!.id, chunk, {
-        reply_parameters:
-          i === 0 && replyToMessageId
-            ? { message_id: replyToMessageId }
-            : undefined,
-      })) as Message.TextMessage;
-
-      sentMessages.push(sentMessage);
-    }
-
-    return sentMessages;
-  }
-
-  // Split message into smaller parts
-  private splitMessage(text: string): string[] {
-    const chunks: string[] = [];
-    let currentChunk = "";
-
-    const lines = text.split("\n");
-    for (const line of lines) {
-      if (currentChunk.length + line.length + 1 <= MAX_MESSAGE_LENGTH) {
-        currentChunk += (currentChunk ? "\n" : "") + line;
-      } else {
-        if (currentChunk) chunks.push(currentChunk);
-        currentChunk = line;
-      }
-    }
-
-    if (currentChunk) chunks.push(currentChunk);
-    return chunks;
+    return false;
   }
 
   // Generate a response using AI
@@ -339,101 +257,42 @@ export class MessageManager {
 
   // Main handler for incoming messages
   public async handleMessage(ctx: Context): Promise<void> {
-    if (!ctx.message || !ctx.from) {
-      return; // Exit if no message or sender info
-    }
-
-    if (
-      this.runtime.character.clientConfig?.telegram?.shouldIgnoreBotMessages &&
-      ctx.from.is_bot
-    ) {
-      return;
-    }
-    if (
-      this.runtime.character.clientConfig?.telegram
-        ?.shouldIgnoreDirectMessages &&
-      ctx.chat?.type === "private"
-    ) {
-      return;
-    }
-
-    const message = ctx.message;
-
     try {
-      // Convert IDs to UUIDs
-      const userId = stringToUuid(ctx.from.id.toString()) as UUID;
-      const userName =
-        ctx.from.username || ctx.from.first_name || "Unknown User";
-      const chatId = stringToUuid(
-        ctx.chat?.id.toString() + "-" + this.runtime.agentId
-      ) as UUID;
-      const agentId = this.runtime.agentId;
-      const roomId = chatId;
+      console.log("Handling message:", ctx.message);
 
-      await this.runtime.ensureConnection(
-        userId,
-        roomId,
-        userName,
-        userName,
-        "telegram"
-      );
-
-      const messageId = stringToUuid(
-        message.message_id.toString() + "-" + this.runtime.agentId
-      ) as UUID;
-
-      // Handle images
-      const imageInfo = await this.processImage(message);
-
-      // Get text or caption
-      let messageText = "";
-      if ("text" in message) {
-        messageText = ctx.match as string;
-      } else if ("caption" in message && message.caption) {
-        messageText = message.caption;
+      if (!ctx.message?.text) {
+        console.log("No message text, skipping");
+        return;
       }
 
-      // Combine text and image description
-      const fullText = imageInfo
-        ? `${messageText} ${imageInfo.description}`
-        : messageText;
-
-      if (!fullText) {
-        return; // Skip if no content
-      }
-
-      const content: Content = {
-        text: fullText,
-        source: "telegram",
-        inReplyTo:
-          "reply_to_message" in message && message.reply_to_message
-            ? stringToUuid(
-                message.reply_to_message.message_id.toString() +
-                  "-" +
-                  this.runtime.agentId
-              )
-            : undefined,
+      // Create memory from the message with required text
+      const memory: ElizaMessage = {
+        id: randomUUID(),
+        agentId: stringToUuid(this.runtime.character.name),
+        userId: stringToUuid(ctx.from?.id.toString() || "unknown"),
+        roomId: stringToUuid(ctx.chat?.id.toString() || "unknown"),
+        content: {
+          text: ctx.message.text,
+        },
+        createdAt: Date.now(),
+        embedding: new Array(1536).fill(0),
+        chat: {
+          type: ctx.chat?.type || "private",
+          id: ctx.chat?.id || 0,
+        },
       };
 
-      // Create memory for the message
-
-      const memory = await this.runtime.messageManager.addEmbeddingToMemory({
-        id: messageId,
-        agentId,
-        userId,
-        roomId,
-        content,
-        createdAt: message.date * 1000,
-      });
-      // set unique to avoid duplicating memories
-      await this.runtime.messageManager.createMemory(memory, true);
       // Update state with the new memory
       let state = await this.runtime.composeState(memory);
       state = await this.runtime.updateRecentMessageState(state);
+
       // Decide whether to respond
-      const shouldRespond = await this._shouldRespond(message, state);
+      const shouldRespond = await this._shouldRespond(memory, state);
 
       if (shouldRespond) {
+        // Show typing indicator
+        await ctx.replyWithChatAction("typing");
+
         const context = composeContext({
           state,
           template:
@@ -441,85 +300,48 @@ export class MessageManager {
             this.runtime.character?.templates?.messageHandlerTemplate ||
             telegramMessageHandlerTemplate,
         });
-        elizaLogger.debug(
-          "[handleMessage] context",
-          JSON.stringify(context, null, 2)
-        );
+
         const responseContent = await this._generateResponse(
           memory,
           state,
           context
         );
 
-        if (!responseContent || !responseContent.text) return;
-
-        // Send response in chunks
-        const callback: HandlerCallback = async (content: Content) => {
-          const sentMessages = await this.sendMessageInChunks(
-            ctx,
-            content.text,
-            message.message_id
+        if (!responseContent?.text) {
+          await ctx.reply(
+            "I'm having trouble generating a response right now."
           );
+          return;
+        }
 
-          const memories: Memory[] = [];
-
-          // Create memories for each sent message
-          for (let i = 0; i < sentMessages.length; i++) {
-            const sentMessage = sentMessages[i];
-            const isLastMessage = i === sentMessages.length - 1;
-
-            const memory: Memory = {
-              id: stringToUuid(
-                sentMessage.message_id.toString() + "-" + this.runtime.agentId
-              ),
-              agentId,
-              userId,
-              roomId,
-              content: {
-                ...content,
-                text: sentMessage.text,
-                inReplyTo: messageId,
-              },
-              createdAt: sentMessage.date * 1000,
-              embedding: getEmbeddingZeroVector(),
-            };
-            elizaLogger.info(
-              `[eliza.service] memory action ${memory.content.action}`
-            );
-
-            // Set action to CONTINUE for all messages except the last one
-            // For the last message, use the original action from the response content
-            memory.content.action = !isLastMessage ? "IGNORE" : content.action;
-
-            await this.runtime.messageManager.createMemory(memory);
-            memories.push(memory);
-          }
-
-          return memories;
-        };
-
-        // Execute callback to send messages and log memories
-        const responseMessages = await callback(responseContent);
-
-        // Update state after response
-        state = await this.runtime.updateRecentMessageState(state);
-
-        elizaLogger.debug("[eliza.service] processing resulting actions");
-        await this.runtime.processActions(
-          memory,
-          responseMessages,
-          state,
-          callback
-        );
-
-        elizaLogger.debug("[eliza.service] evaluating");
-        const data = await this.runtime.evaluate(memory, state, shouldRespond);
-        elizaLogger.debug(`[eliza.service] evaluated ${data}`);
+        // Use the splitMessage utility function
+        const chunks = this.splitMessage(responseContent.text);
+        for (const chunk of chunks) {
+          await ctx.reply(chunk);
+        }
       }
     } catch (error) {
-      console.error("❌ Error handling message:", error);
-      console.error("Error sending message:", error);
+      console.error("Error handling message:", error);
+      await ctx.reply("Sorry, I encountered an error processing your message.");
     }
+  }
+
+  // Add this as a class method
+  private splitMessage(text: string, maxLength = 4096): string[] {
+    const chunks: string[] = [];
+    let currentChunk = "";
+
+    const lines = text.split("\n");
+    for (const line of lines) {
+      if (currentChunk.length + line.length + 1 <= maxLength) {
+        currentChunk += (currentChunk ? "\n" : "") + line;
+      } else {
+        if (currentChunk) chunks.push(currentChunk);
+        currentChunk = line;
+      }
+    }
+    if (currentChunk) chunks.push(currentChunk);
+    return chunks;
   }
 }
 
@@ -624,13 +446,34 @@ export class ElizaService extends BaseService {
       // not sure where this should actually be hooked up
       await StorageService.getInstance().start();
     } catch (err) {
-      elizaLogger.warn("[eliza] gated storage service is unavailable");
+      elizaLogger.warn("[eliza]: gated storage service is unavailable");
     }
     try {
       //register AI based command handlers here
-      this.bot.command("eliza", (ctx) =>
-        this.messageManager.handleMessage(ctx)
-      );
+      console.log("Registering Eliza command handler");
+      this.bot.command("eliza", async (ctx) => {
+        try {
+          await this.messageManager.handleMessage(ctx);
+        } catch (err) {
+          console.error("Error handling eliza command:", err);
+          await ctx.reply(
+            "Sorry, I encountered an error processing your request."
+          );
+        }
+      });
+
+      // Also handle regular messages
+      this.bot.on("message", async (ctx) => {
+        try {
+          await this.messageManager.handleMessage(ctx);
+        } catch (err) {
+          console.error("Error handling message:", err);
+          await ctx.reply(
+            "Sorry, I encountered an error processing your message."
+          );
+        }
+      });
+
       elizaLogger.info("Eliza service started successfully");
     } catch (error) {
       console.error("Failed to start Eliza service:", error);

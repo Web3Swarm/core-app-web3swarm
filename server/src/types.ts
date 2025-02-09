@@ -59,3 +59,51 @@ export interface IUserOperationReceipt {
   receipt?: ITransactionReceipt;
   logs?: ILog[];
 }
+
+// Agent Types
+export interface Agent {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  category: string;
+  provider: string;
+  isActive?: boolean;
+}
+
+// Swarm Types
+export interface Swarm {
+  id: string;
+  name: string;
+  description: string;
+  agents: Agent[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// Chat Types
+export interface Message {
+  id: string;
+  content: string;
+  sender: "user" | "bot";
+  timestamp: Date;
+  swarmId: string;
+  agentId?: string;
+}
+
+// User Types
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  avatar?: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// API Response Types
+export interface ApiResponse<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}

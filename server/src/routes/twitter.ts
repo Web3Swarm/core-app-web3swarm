@@ -14,6 +14,13 @@ import { WowXYZERC20__factory } from "../contracts/types/index.js";
 import { parseEther, toBeHex } from "ethers";
 import { TwitterService } from "../services/twitter.service.js";
 
+/**
+ * @swagger
+ * tags:
+ *   name: Twitter
+ *   description: Twitter authentication and integration endpoints
+ */
+
 const router = Router();
 
 interface TwitterCacheData {
@@ -63,6 +70,45 @@ function generateCodeChallenge(verifier: string) {
     .replace(/\//g, "_") // Convert '/' to '_'
     .replace(/=/g, ""); // Remove padding '='
 }
+
+/**
+ * @swagger
+ * /auth/twitter/init:
+ *   post:
+ *     summary: Initialize Twitter OAuth 2.0 PKCE flow
+ *     description: Generates state for CSRF protection and creates PKCE verifier/challenge pair
+ *     tags: [Twitter]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               success_uri:
+ *                 type: string
+ *                 description: URI to redirect after successful authentication
+ *     responses:
+ *       200:
+ *         description: Authorization URL for Twitter OAuth
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 authUrl:
+ *                   type: string
+ *                   description: URL to redirect user for Twitter authorization
+ *       500:
+ *         description: Error initializing authentication
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ */
 
 /**
  * Initiates Twitter OAuth 2.0 PKCE flow
@@ -448,5 +494,83 @@ router.post("/tweetCard", async (req: Request, res: Response) => {
     });
   }
 });
+
+/**
+ * @swagger
+ * /auth/twitter/sendAirdrop/{tokenId}/{recipient}:
+ *   get:
+ *     summary: Send token airdrop to recipient
+ *     description: Submits a user operation to send tokens to the specified recipient
+ *     tags: [Twitter]
+ *     parameters:
+ *       - in: path
+ *         name: tokenId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Token contract address
+ *       - in: path
+ *         name: recipient
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Recipient address
+ *     responses:
+ *       200:
+ *         description: Airdrop operation submitted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 userOpHash:
+ *                   type: string
+ *                 receipt:
+ *                   type: object
+ *       500:
+ *         description: Error sending airdrop
+ */
+
+/**
+ * @swagger
+ * /auth/twitter/tweetCard:
+ *   post:
+ *     summary: Tweet about token claim
+ *     description: Creates a tweet with token claim information and transaction details
+ *     tags: [Twitter]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               txHash:
+ *                 type: string
+ *                 description: Transaction hash
+ *               tokenId:
+ *                 type: string
+ *                 description: Token contract address
+ *     responses:
+ *       200:
+ *         description: Tweet sent successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 tweetId:
+ *                   type: string
+ *                 tweetUrl:
+ *                   type: string
+ *       500:
+ *         description: Error sending tweet
+ */
 
 export default router;
